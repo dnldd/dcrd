@@ -705,10 +705,12 @@ user.  Click the method name for further details such as parameter and return in
 |5|[stopnotifyreceived](#stopnotifyreceived)|Cancel registered notifications for when a txout spends to any of the passed addresses.|None|
 |6|[notifyspent](#notifyspent)|Send notification when a txout is spent.|[redeemingtx](#redeemingtx)|
 |7|[stopnotifyspent](#stopnotifyspent)|Cancel registered spending notifications for each passed outpoint.|None|
-|8|[rescan](#rescan)|Rescan block chain for transactions to addresses and spent transaction outpoints.|[recvtx](#recvtx), [redeemingtx](#redeemingtx), [rescanprogress](#rescanprogress), and [rescanfinished](#rescanfinished) |
-|9|[notifynewtransactions](#notifynewtransactions)|Send notifications for all new transactions as they are accepted into the mempool.|[txaccepted](#txaccepted) or [txacceptedverbose](#txacceptedverbose)|
-|10|[stopnotifynewtransactions](#stopnotifynewtransactions)|Stop sending either a txaccepted or a txacceptedverbose notification when a new transaction is accepted into the mempool.|None|
-|11|[session](#session)|Return details regarding a websocket client's current connection.|None|
+|8|[loadtxfilter](#loadtxfilter)|Load, add to, or reload a websocket client's transaction filter for mempool transactions, new blocks and rescanblocks.|[relevanttxaccepted](#relevanttxaccepted)|
+|9|[rescan](#rescan)|Rescan block chain for transactions to addresses and spent transaction outpoints.|[recvtx](#recvtx), [redeemingtx](#redeemingtx), [rescanprogress](#rescanprogress), and [rescanfinished](#rescanfinished) |
+|10|[notifynewtransactions](#notifynewtransactions)|Send notifications for all new transactions as they are accepted into the mempool.|[txaccepted](#txaccepted) or [txacceptedverbose](#txacceptedverbose)|
+|11|[stopnotifynewtransactions](#stopnotifynewtransactions)|Stop sending either a txaccepted or a txacceptedverbose notification when a new transaction is accepted into the mempool.|None|
+|12|[session](#session)|Return details regarding a websocket client's current connection.|None|
+
 
 <a name="WSExtMethodDetails" />
 
@@ -719,7 +721,7 @@ user.  Click the method name for further details such as parameter and return in
 |   |   |
 |---|---|
 |Method|authenticate|
-|Parameters|1. username (string, required)<br />2. passphrase (string, required)|
+|Parameters|1. username (string, required)<br /><br />2. passphrase (string, required)|
 |Description|Authenticate the connection against the username and password configured for the RPC server.<br />  Invoking any other method before authenticating with this command will close the connection.<br /><font color="orange">NOTE: This is only required if an HTTP Authorization header is not being used.</font>|
 |Returns|Success: Nothing<br />Failure: Nothing (websocket disconnected)|
 [Return to Overview](#WSExtMethodOverview)<br />
@@ -803,15 +805,29 @@ user.  Click the method name for further details such as parameter and return in
 
 ***
 
+<a name="loadtxfilter"/>
+
+|   |   |
+|---|---|
+|Method|loadtxfilter|
+|Notifications|[relevanttxaccepted](#relevanttxaccepted)|
+|Parameters|1. Reload (boolean, required) - Load a new filter instead of adding data to an existing one<br /><br />2. Addresses (JSON array, required) - Array of addresses to add to the transaction filter<br /><br />3. Outpoints (JSON array, required) - Array of outpoints to add to the transaction filter|
+|Description|Load, add to, or reload a websocket client's transaction filter for mempool transactions, new blocks and [rescanblocks](#rescanblocks).|
+|Returns|Nothing|
+[Return to Overview](#WSExtMethodOverview)<br />
+
+***
+
 <a name="rescan"/>
 
 |   |   |
 |---|---|
 |Method|rescan|
-|Notifications|[recvtx](#recvtx), [redeemingtx](#redeemingtx), [rescanprogress](#rescanprogress), and [rescanfinished](#rescanfinished)|
-|Parameters|1. BeginBlock (string, required) block hash to begin rescanning from<br /><br />2. Addresses (JSON array, required)<br />`(json array of strings)`<br />`decredaddress`: (string) the decred address<br />`[ "decredaddress", ...]`<br /><br />3. Outpoints (JSON array, required)<br />`(JSON array)`<br />`hash`: (string) the hex-encoded bytes of the outpoint hash<br /> `index`: (numeric) the txout index of the outpoint<br />`[{"hash":"data", "index":n }, ...]`<br /><br /> 4. EndBlock (string, optional) hash of final block to rescan|
-|Description|Rescan block chain for transactions to addresses, starting at block BeginBlock and ending at EndBlock.  The current known UTXO set for all passed addresses at height BeginBlock should included in the Outpoints argument.  If EndBlock is omitted, the rescan continues through the best block in the main chain.  Additionally, if no EndBlock is provided, the client is automatically registered for transaction notifications for all rescanned addresses and the final UTXO set.  Rescan results are sent as recvtx and redeemingtx notifications.  This call returns once the rescan completes.|
-|Returns|Nothing|
+|Notifications|None|
+|Parameters|1. Blockhashes (JSON array, required) - List of hashes to rescan. Each next block must be a child of the previous.|
+|Description|Rescan blocks for transactions matching the loaded transaction filter.|
+|Returns|`(json array)`<br /> `hash`: (string) Hash of the matching block.<br />`transactions`: (json array) List of matching transactions, serialized and hex-encoded.<br />`serializedtx`: (string) Serialized and hex-encoded transaction.<br />`[{"hash": "data", "transactions": [serializedtx,...]}, ...]`|
+|Example Return|`[{"hash": "0000002099417930b2ae09feda10e38b58c0f6bb44b4d60fa33f0e000000000000000000d53...", "transactions": ["493046022100cb42f8df44eca83dd0a727988dcde9384953e830b1f8004d57485e2ede1b9c8...", ...]}, ...]`|
 [Return to Overview](#WSExtMethodOverview)<br />
 
 ***
