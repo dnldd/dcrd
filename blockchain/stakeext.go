@@ -55,6 +55,8 @@ func (b *BlockChain) lotteryDataForBlock(hash *chainhash.Hash) ([]chainhash.Hash
 		node = n
 	} else {
 		var err error
+		b.chainLock.Lock()
+		defer b.chainLock.Unlock()
 		node, err = b.findNode(hash, maxSearchDepth)
 		if err != nil {
 			return nil, 0, [6]byte{}, err
@@ -73,14 +75,7 @@ func (b *BlockChain) lotteryDataForBlock(hash *chainhash.Hash) ([]chainhash.Hash
 // chain, including side chain blocks.
 //
 // It is safe for concurrent access.
-// TODO An optimization can be added that only calls the read lock if the
-//   block is not minMemoryStakeNodes blocks before the current best node.
-//   This is because all the data for these nodes can be assumed to be
-//   in memory.
 func (b *BlockChain) LotteryDataForBlock(hash *chainhash.Hash) ([]chainhash.Hash, int, [6]byte, error) {
-	b.chainLock.Lock()
-	defer b.chainLock.Unlock()
-
 	return b.lotteryDataForBlock(hash)
 }
 
