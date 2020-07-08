@@ -1165,6 +1165,29 @@ func (sp *serverPeer) OnGetCFilter(p *peer.Peer, msg *wire.MsgGetCFilter) {
 		return
 	}
 
+	// Ensure the committed filter index is synced.
+	cfIndex := sp.server.cfIndex
+	tHeight, tHash, err := cfIndex.Tip()
+	if err != nil {
+		peerLog.Error(err.Error())
+		return
+	}
+
+	chain := sp.server.chain
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		peerLog.Errorf("%s: index not synced", cfIndex.Name())
+		return
+	}
+
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			peerLog.Errorf("%s: index not synced", cfIndex.Name())
+			return
+		case <-cfIndex.WaitForSync():
+		}
+	}
+
 	filterBytes, err := sp.server.cfIndex.FilterByBlockHash(&msg.BlockHash,
 		msg.FilterType)
 	if err != nil {
@@ -1286,8 +1309,29 @@ func (sp *serverPeer) OnGetCFHeaders(p *peer.Peer, msg *wire.MsgGetCFHeaders) {
 		return
 	}
 
-	// Generate cfheaders message and send it.
+	// Ensure the committed filter index is synced.
 	cfIndex := sp.server.cfIndex
+	tHeight, tHash, err := cfIndex.Tip()
+	if err != nil {
+		peerLog.Error(err.Error())
+		return
+	}
+
+	if chain.BestSnapshot().Height > (tHeight + 5) {
+		peerLog.Errorf("%s: index not synced", cfIndex.Name())
+		return
+	}
+
+	for !chain.BestSnapshot().Hash.IsEqual(tHash) {
+		select {
+		case <-time.After(syncWait):
+			peerLog.Errorf("%s: index not synced", cfIndex.Name())
+			return
+		case <-cfIndex.WaitForSync():
+		}
+	}
+
+	// Generate cfheaders message and send it.
 	headersMsg := wire.NewMsgCFHeaders()
 	for i := range hashList {
 		// Fetch the raw committed filter header bytes from the database.
