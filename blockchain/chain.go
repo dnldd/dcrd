@@ -144,7 +144,7 @@ type BlockChain struct {
 	timeSource          MedianTimeSource
 	notifications       NotificationCallback
 	sigCache            *txscript.SigCache
-	indexManager        indexers.IndexManager
+	indexSubscriber     *indexers.IndexSubscriber
 
 	// subsidyCache is the cache that provides quick lookup of subsidy
 	// values.
@@ -299,6 +299,37 @@ func (b *BlockChain) GetStakeVersions(hash *chainhash.Hash, count int32) ([]Stak
 type VoteInfo struct {
 	Agendas      []chaincfg.ConsensusDeployment
 	AgendaStatus []ThresholdStateTuple
+}
+
+// prevScriptsSnapshot makes a copy of the entries in the provided viewpoint.
+// It implements the PrevScripter interface.
+type prevScriptsSnapshot struct {
+	entries map[chainhash.Hash]*UtxoEntry
+}
+
+// newPrevScriptSnapshot creates snapshot from the provided view.
+func newPrevScriptSnapshot(view *UtxoViewpoint) *prevScriptsSnapshot {
+	snapshot := &prevScriptsSnapshot{
+		entries: make(map[chainhash.Hash]*UtxoEntry, len(view.entries)),
+	}
+
+	for k, v := range view.entries {
+		snapshot.entries[k] = v.Clone()
+	}
+
+	return snapshot
+}
+
+// PrevScript returns the prevScript of the provided output.
+func (p *prevScriptsSnapshot) PrevScript(prevOut *wire.OutPoint) (uint16, []byte, bool) {
+	entry := p.entries[prevOut.Hash]
+	if entry == nil {
+		return 0, nil, false
+	}
+
+	version := entry.ScriptVersionByIndex(prevOut.Index)
+	pkScript := entry.PkScriptByIndex(prevOut.Index)
+	return version, pkScript, true
 }
 
 // GetVoteInfo returns information on consensus deployment agendas
@@ -512,6 +543,25 @@ func (b *BlockChain) pushMainChainBlockCache(block *dcrutil.Block) {
 	b.mainChainBlockCacheLock.Unlock()
 }
 
+// PrevScripts returns a source of previous transaction scripts and their
+// associated versions spent by the given block by using the spend journal.
+func (b *BlockChain) PrevScripts(dbTx database.Tx, block *dcrutil.Block) (indexers.PrevScripter, error) {
+	// Load all of the spent transaction output data from the database.
+	stxos, err := dbFetchSpendJournalEntry(dbTx, block)
+	if err != nil {
+		return nil, err
+	}
+
+	prevScripts := stxosToScriptSource(block, stxos, currentCompressionVersion)
+	return prevScripts, nil
+}
+
+// Best returns the height and hash of the current best chain tip.
+func (b *BlockChain) Best() (int64, *chainhash.Hash) {
+	snapshot := b.BestSnapshot()
+	return snapshot.Height, &snapshot.Hash
+}
+
 // connectBlock handles connecting the passed node/block to the end of the main
 // (best) chain.
 //
@@ -620,25 +670,27 @@ func (b *BlockChain) connectBlock(node *blockNode, block, parent *dcrutil.Block,
 			return err
 		}
 
-		// Allow the index manager to call each of the currently active
-		// optional indexes with the block being connected so they can
-		// update themselves accordingly.
-		if b.indexManager != nil {
-			err := b.indexManager.ConnectBlock(dbTx, block, parent, view)
-			if err != nil {
-				return err
-			}
-		}
-
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 
+	prevScripter := newPrevScriptSnapshot(view)
+
 	// Prune fully spent entries and mark all entries in the view unmodified
 	// now that the modifications have been committed to the database.
 	view.commit()
+
+	// Notify subscribed indexes of the connected block.
+	if b.indexSubscriber != nil {
+		b.indexSubscriber.Notify(&indexers.IndexNtfn{
+			NtfnType:    indexers.ConnectNtfn,
+			Block:       block,
+			Parent:      parent,
+			PrevScripts: prevScripter,
+		})
+	}
 
 	// This node is now the end of the best chain.
 	b.bestChain.SetTip(node)
@@ -799,25 +851,27 @@ func (b *BlockChain) disconnectBlock(node *blockNode, block, parent *dcrutil.Blo
 		// ensure that lightweight clients still have access to them if they
 		// happen to be on a side chain after coming back online after a reorg.
 
-		// Allow the index manager to call each of the currently active
-		// optional indexes with the block being disconnected so they
-		// can update themselves accordingly.
-		if b.indexManager != nil {
-			err := b.indexManager.DisconnectBlock(dbTx, block, parent, view)
-			if err != nil {
-				return err
-			}
-		}
-
 		return nil
 	})
 	if err != nil {
 		return err
 	}
 
+	prevScripter := newPrevScriptSnapshot(view)
+
 	// Prune fully spent entries and mark all entries in the view unmodified
 	// now that the modifications have been committed to the database.
 	view.commit()
+
+	// Notify subscribed indexes of the disconnected block.
+	if b.indexSubscriber != nil {
+		b.indexSubscriber.Notify(&indexers.IndexNtfn{
+			NtfnType:    indexers.DisconnectNtfn,
+			Block:       block,
+			Parent:      parent,
+			PrevScripts: prevScripter,
+		})
+	}
 
 	// This node's parent is now the end of the best chain.
 	b.bestChain.SetTip(node.parent)
@@ -1878,40 +1932,6 @@ func extractDeploymentIDVersions(params *chaincfg.Params) (map[string]uint32, er
 	return deploymentVers, nil
 }
 
-// chainQueryerAdapter provides an adapter from a BlockChain instance to the
-// indexers.ChainQueryer interface.
-type chainQueryerAdapter struct {
-	*BlockChain
-}
-
-// BestHeight returns the height of the current best block.  It is equivalent to
-// the Height field of the BestSnapshot method, however, it is needed to satisfy
-// the indexers.ChainQueryer interface.
-//
-// It is defined via a separate internal struct to avoid polluting the public
-// API of the BlockChain type itself.
-func (q *chainQueryerAdapter) BestHeight() int64 {
-	return q.BestSnapshot().Height
-}
-
-// PrevScripts returns a source of previous transaction scripts and their
-// associated versions spent by the given block by using the spend journal.
-//
-// It is defined via a separate internal struct to avoid polluting the public
-// API of the BlockChain type itself.
-//
-// This is part of the indexers.ChainQueryer interface.
-func (q *chainQueryerAdapter) PrevScripts(dbTx database.Tx, block *dcrutil.Block) (indexers.PrevScripter, error) {
-	// Load all of the spent transaction output data from the database.
-	stxos, err := dbFetchSpendJournalEntry(dbTx, block)
-	if err != nil {
-		return nil, err
-	}
-
-	prevScripts := stxosToScriptSource(block, stxos, currentCompressionVersion)
-	return prevScripts, nil
-}
-
 // Config is a descriptor which specifies the blockchain instance configuration.
 type Config struct {
 	// DB defines the database which houses the blocks and will be used to
@@ -1967,12 +1987,9 @@ type Config struct {
 	// subsidy cache.
 	SubsidyCache *standalone.SubsidyCache
 
-	// IndexManager defines an index manager to use when initializing the
-	// chain and connecting and disconnecting blocks.
-	//
-	// This field can be nil if the caller does not wish to make use of an
-	// index manager.
-	IndexManager indexers.IndexManager
+	// IndexubSubscriber defines a subscriber for relaying updates
+	// concerning connected and disconnected blocks to subscribed index clients.
+	IndexSubscriber *indexers.IndexSubscriber
 }
 
 // New returns a BlockChain instance using the provided configuration details.
@@ -2025,7 +2042,7 @@ func New(ctx context.Context, config *Config) (*BlockChain, error) {
 		timeSource:                    config.TimeSource,
 		notifications:                 config.Notifications,
 		sigCache:                      config.SigCache,
-		indexManager:                  config.IndexManager,
+		indexSubscriber:               config.IndexSubscriber,
 		subsidyCache:                  subsidyCache,
 		index:                         newBlockIndex(config.DB),
 		bestChain:                     newChainView(nil),
@@ -2044,16 +2061,6 @@ func New(ctx context.Context, config *Config) (*BlockChain, error) {
 	// will be initialized to contain only the genesis block.
 	if err := b.initChainState(ctx); err != nil {
 		return nil, err
-	}
-
-	// Initialize and catch up all of the currently active optional indexes
-	// as needed.
-	queryAdapter := chainQueryerAdapter{BlockChain: &b}
-	if config.IndexManager != nil {
-		err := config.IndexManager.Init(ctx, &queryAdapter)
-		if err != nil {
-			return nil, err
-		}
 	}
 
 	// The version 5 database upgrade requires a full reindex.  Perform, or

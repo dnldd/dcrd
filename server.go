@@ -465,6 +465,7 @@ type server struct {
 	// if the associated index is not enabled.  These fields are set during
 	// initial creation of the server and never changed afterwards, so they
 	// do not need to be protected for concurrent access.
+	indexSubscriber *indexers.IndexSubscriber
 	txIndex         *indexers.TxIndex
 	addrIndex       *indexers.AddrIndex
 	existsAddrIndex *indexers.ExistsAddrIndex
@@ -2890,6 +2891,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 		services:             services,
 		sigCache:             txscript.NewSigCache(cfg.SigCacheMaxSize),
 		subsidyCache:         standalone.NewSubsidyCache(chainParams),
+		indexSubscriber:      indexers.NewIndexSubscriber(ctx),
 	}
 
 	feC := fees.EstimatorConfig{
@@ -2930,12 +2932,54 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 					s.blockManager.handleBlockchainNotification(notification)
 				}
 			},
-			SigCache:     s.sigCache,
-			SubsidyCache: s.subsidyCache,
-			IndexManager: indexManager,
+			SigCache:        s.sigCache,
+			SubsidyCache:    s.subsidyCache,
+			IndexSubscriber: s.indexSubscriber,
 		})
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.TxIndex || cfg.AddrIndex {
+		// Enable transaction index if address index is enabled since it
+		// requires it.
+		if !cfg.TxIndex {
+			indxLog.Infof("Transaction index enabled because it " +
+				"is required by the address index")
+			cfg.TxIndex = true
+		} else {
+			indxLog.Info("Transaction index is enabled")
+		}
+
+		s.txIndex, err = indexers.NewTxIndex(ctx, db, s.chain, s.chainParams,
+			s.indexSubscriber)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if cfg.AddrIndex {
+		indxLog.Info("Address index is enabled")
+		s.addrIndex, err = indexers.NewAddrIndex(ctx, db, s.chain, s.chainParams,
+			s.indexSubscriber)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !cfg.NoExistsAddrIndex {
+		indxLog.Info("Exists address index is enabled")
+		s.existsAddrIndex, err = indexers.NewExistsAddrIndex(ctx, db, s.chain,
+			s.chainParams, s.indexSubscriber)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !cfg.NoCFilters {
+		indxLog.Info("CF index is enabled")
+		s.cfIndex, err = indexers.NewCfIndex(ctx, db, s.chain,
+			s.chainParams, s.indexSubscriber)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	txC := mempool.Config{
