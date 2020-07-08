@@ -2892,43 +2892,6 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 		subsidyCache:         standalone.NewSubsidyCache(chainParams),
 	}
 
-	// Create the transaction and address indexes if needed.
-	//
-	// CAUTION: the txindex needs to be first in the indexes array because
-	// the addrindex uses data from the txindex during catchup.  If the
-	// addrindex is run first, it may not have the transactions from the
-	// current block indexed.
-	var indexes []indexers.Indexer
-	if cfg.TxIndex || cfg.AddrIndex {
-		// Enable transaction index if address index is enabled since it
-		// requires it.
-		if !cfg.TxIndex {
-			indxLog.Infof("Transaction index enabled because it " +
-				"is required by the address index")
-			cfg.TxIndex = true
-		} else {
-			indxLog.Info("Transaction index is enabled")
-		}
-
-		s.txIndex = indexers.NewTxIndex(db)
-		indexes = append(indexes, s.txIndex)
-	}
-	if cfg.AddrIndex {
-		indxLog.Info("Address index is enabled")
-		s.addrIndex = indexers.NewAddrIndex(db, chainParams)
-		indexes = append(indexes, s.addrIndex)
-	}
-	if !cfg.NoExistsAddrIndex {
-		indxLog.Info("Exists address index is enabled")
-		s.existsAddrIndex = indexers.NewExistsAddrIndex(db, chainParams)
-		indexes = append(indexes, s.existsAddrIndex)
-	}
-	if !cfg.NoCFilters {
-		indxLog.Info("CF index is enabled")
-		s.cfIndex = indexers.NewCfIndex(db, chainParams)
-		indexes = append(indexes, s.cfIndex)
-	}
-
 	feC := fees.EstimatorConfig{
 		MinBucketFee: cfg.minRelayTxFee,
 		MaxBucketFee: dcrutil.Amount(fees.DefaultMaxBucketFeeMultiplier) * cfg.minRelayTxFee,
@@ -2948,12 +2911,6 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 		return nil, err
 	}
 	s.feeEstimator = fe
-
-	// Create an index manager if any of the optional indexes are enabled.
-	var indexManager indexers.IndexManager
-	if len(indexes) > 0 {
-		indexManager = indexers.NewManager(db, indexes, chainParams)
-	}
 
 	// Only configure checkpoints when enabled.
 	var checkpoints []chaincfg.Checkpoint
