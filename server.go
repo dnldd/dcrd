@@ -3088,6 +3088,7 @@ func newServer(ctx context.Context, listenAddrs []string, db database.DB, chainP
 		FeeEstimator:       s.feeEstimator,
 		TxMemPool:          s.txMemPool,
 		BgBlkTmplGenerator: nil, // Created later.
+		IndexSubscriber:    s.indexSubscriber,
 		NotifyWinningTickets: func(wtnd *WinningTicketsNtfnData) {
 			if s.rpcServer != nil {
 				s.rpcServer.ntfnMgr.NotifyWinningTickets(wtnd)

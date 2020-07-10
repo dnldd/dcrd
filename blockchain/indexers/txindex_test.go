@@ -128,7 +128,7 @@ func (tq *tChain) BlockByHash(hash *chainhash.Hash) (*dcrutil.Block, error) {
 	return blk, nil
 }
 
-func (tq *tChain) PrevScripts(database.Tx, *dcrutil.Block) (PrevScripter, error) {
+func (tq *tChain) PrevScripts(*dcrutil.Block) (PrevScripter, error) {
 	return nil, nil
 }
 

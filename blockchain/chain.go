@@ -301,37 +301,6 @@ type VoteInfo struct {
 	AgendaStatus []ThresholdStateTuple
 }
 
-// prevScriptsSnapshot makes a copy of the entries in the provided viewpoint.
-// It implements the PrevScripter interface.
-type prevScriptsSnapshot struct {
-	entries map[chainhash.Hash]*UtxoEntry
-}
-
-// newPrevScriptSnapshot creates snapshot from the provided view.
-func newPrevScriptSnapshot(view *UtxoViewpoint) *prevScriptsSnapshot {
-	snapshot := &prevScriptsSnapshot{
-		entries: make(map[chainhash.Hash]*UtxoEntry, len(view.entries)),
-	}
-
-	for k, v := range view.entries {
-		snapshot.entries[k] = v.Clone()
-	}
-
-	return snapshot
-}
-
-// PrevScript returns the prevScript of the provided output.
-func (p *prevScriptsSnapshot) PrevScript(prevOut *wire.OutPoint) (uint16, []byte, bool) {
-	entry := p.entries[prevOut.Hash]
-	if entry == nil {
-		return 0, nil, false
-	}
-
-	version := entry.ScriptVersionByIndex(prevOut.Index)
-	pkScript := entry.PkScriptByIndex(prevOut.Index)
-	return version, pkScript, true
-}
-
 // GetVoteInfo returns information on consensus deployment agendas
 // and their respective states at the provided hash, for the provided
 // deployment version.
@@ -545,9 +514,15 @@ func (b *BlockChain) pushMainChainBlockCache(block *dcrutil.Block) {
 
 // PrevScripts returns a source of previous transaction scripts and their
 // associated versions spent by the given block by using the spend journal.
-func (b *BlockChain) PrevScripts(dbTx database.Tx, block *dcrutil.Block) (indexers.PrevScripter, error) {
-	// Load all of the spent transaction output data from the database.
-	stxos, err := dbFetchSpendJournalEntry(dbTx, block)
+func (b *BlockChain) PrevScripts(block *dcrutil.Block) (indexers.PrevScripter, error) {
+	var stxos []spentTxOut
+	err := b.db.View(func(dbTx database.Tx) error {
+		var err error
+
+		// Load all of the spent transaction output data from the database.
+		stxos, err = dbFetchSpendJournalEntry(dbTx, block)
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -676,21 +651,9 @@ func (b *BlockChain) connectBlock(node *blockNode, block, parent *dcrutil.Block,
 		return err
 	}
 
-	prevScripter := newPrevScriptSnapshot(view)
-
 	// Prune fully spent entries and mark all entries in the view unmodified
 	// now that the modifications have been committed to the database.
 	view.commit()
-
-	// Notify subscribed indexes of the connected block.
-	if b.indexSubscriber != nil {
-		b.indexSubscriber.Notify(&indexers.IndexNtfn{
-			NtfnType:    indexers.ConnectNtfn,
-			Block:       block,
-			Parent:      parent,
-			PrevScripts: prevScripter,
-		})
-	}
 
 	// This node is now the end of the best chain.
 	b.bestChain.SetTip(node)
@@ -857,21 +820,9 @@ func (b *BlockChain) disconnectBlock(node *blockNode, block, parent *dcrutil.Blo
 		return err
 	}
 
-	prevScripter := newPrevScriptSnapshot(view)
-
 	// Prune fully spent entries and mark all entries in the view unmodified
 	// now that the modifications have been committed to the database.
 	view.commit()
-
-	// Notify subscribed indexes of the disconnected block.
-	if b.indexSubscriber != nil {
-		b.indexSubscriber.Notify(&indexers.IndexNtfn{
-			NtfnType:    indexers.DisconnectNtfn,
-			Block:       block,
-			Parent:      parent,
-			PrevScripts: prevScripter,
-		})
-	}
 
 	// This node's parent is now the end of the best chain.
 	b.bestChain.SetTip(node.parent)

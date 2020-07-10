@@ -72,7 +72,7 @@ type ChainQueryer interface {
 
 	// PrevScripts returns a source of previous transaction scripts and their
 	// associated versions spent by the given block.
-	PrevScripts(database.Tx, *dcrutil.Block) (PrevScripter, error)
+	PrevScripts(*dcrutil.Block) (PrevScripter, error)
 }
 
 // Indexer defines a generic interface for an indexer.
@@ -427,83 +427,70 @@ func recover(ctx context.Context, db database.DB, indexer Indexer, chain ChainQu
 		return nil
 	}
 
-	var interrupted bool
+	// Loop until the tip is a block that exists in the main chain.
 	initialHeight := height
-	err = db.Update(func(dbTx database.Tx) error {
-		// Loop until the tip is a block that exists in the main chain.
-		for !chain.MainChainHasBlock(hash) {
-			// Get the block, unless it's already cached.
-			var block *dcrutil.Block
-			if cachedBlock == nil && height > 0 {
-				block, err = chain.BlockByHash(hash)
-				if err != nil {
-					return err
-				}
-			} else {
-				block = cachedBlock
-			}
-
-			// Load the parent block for the height since it is
-			// required to remove it.
-			parentHash := &block.MsgBlock().Header.PrevBlock
-			parent, err := chain.BlockByHash(parentHash)
+	for !chain.MainChainHasBlock(hash) {
+		// Get the block, unless it's already cached.
+		var block *dcrutil.Block
+		if cachedBlock == nil && height > 0 {
+			block, err = chain.BlockByHash(hash)
 			if err != nil {
 				return err
 			}
-			cachedBlock = parent
+		} else {
+			block = cachedBlock
+		}
 
-			// When the index requires all of the referenced
-			// txouts they need to be retrieved from the
-			// database.
-			var prevScripts PrevScripter
-			if indexNeedsInputs(indexer) {
-				var err error
-				prevScripts, err = chain.PrevScripts(dbTx, block)
-				if err != nil {
-					return err
-				}
+		// Load the parent block for the height since it is
+		// required to remove it.
+		parentHash := &block.MsgBlock().Header.PrevBlock
+		parent, err := chain.BlockByHash(parentHash)
+		if err != nil {
+			return err
+		}
+		cachedBlock = parent
+
+		// When the index requires all of the referenced
+		// txouts they need to be retrieved from the
+		// database.
+		var prevScripts PrevScripter
+		if indexNeedsInputs(indexer) {
+			var err error
+			prevScripts, err = chain.PrevScripts(block)
+			if err != nil {
+				return err
 			}
+		}
 
-			// Remove all of the index entries associated
-			// with the block and update the indexer tip.
-			err = indexer.ProcessNotification(dbTx, &IndexNtfn{
+		// Remove all of the index entries associated
+		// with the block and update the indexer tip.
+		err = db.Update(func(dbTx database.Tx) error {
+			return indexer.ProcessNotification(dbTx, &IndexNtfn{
 				NtfnType:    DisconnectNtfn,
 				Block:       block,
 				Parent:      parent,
 				PrevScripts: prevScripts,
 			})
-			if err != nil {
-				return err
-			}
-
-			// Update the tip to the previous block.
-			hash = &block.MsgBlock().Header.PrevBlock
-			height--
-
-			// NOTE: This does not return as it does
-			// elsewhere since it would cause the
-			// database transaction to rollback and
-			// undo all work that has been done.
-			if interruptRequested(ctx) {
-				interrupted = true
-				break
-			}
+		})
+		if err != nil {
+			return err
 		}
 
-		if initialHeight != height {
-			log.Infof("Removed %d orphaned blocks from %s "+
-				"(heights %d to %d)", initialHeight-height,
-				indexer.Name(), height+1, initialHeight)
-		}
+		// Update the tip to the previous block.
+		hash = &block.MsgBlock().Header.PrevBlock
+		height--
 
-		return nil
-	})
-	if err != nil {
-		return err
+		if interruptRequested(ctx) {
+			return errInterruptRequested
+		}
 	}
-	if interrupted {
-		return errInterruptRequested
+
+	if initialHeight != height {
+		log.Infof("Removed %d orphaned blocks from %s "+
+			"(heights %d to %d)", initialHeight-height,
+			indexer.Name(), height+1, initialHeight)
 	}
+
 	return nil
 }
 
@@ -519,96 +506,78 @@ func catchUp(ctx context.Context, db database.DB, indexer Indexer, chain ChainQu
 		return err
 	}
 
-	var interrupted bool
+	// Loop until the tip is at best block hash on the main chain.
 	initialTipHeight := height
-	err = db.Update(func(dbTx database.Tx) error {
-		for {
-			// Nothing to do if index is synced.
-			bestHeight, _ := chain.Best()
-			if bestHeight == height {
-				return nil
-			}
+	for _, bestHash := chain.Best(); !hash.IsEqual(bestHash); {
+		nextTipHeight := height + 1
+		nextTipHash, err := chain.BlockHashByHeight(nextTipHeight)
+		if err != nil {
+			return err
+		}
 
-			nextTipHeight := height + 1
-			nextTipHash, err := chain.BlockHashByHeight(nextTipHeight)
+		// Ensure the next tip hash is on the main chain.
+		if !chain.MainChainHasBlock(nextTipHash) {
+			return fmt.Errorf("the next block being synced to (%s) "+
+				"at height %d is "+"not on the main chain.",
+				nextTipHash, nextTipHeight)
+		}
+
+		var parent *dcrutil.Block
+		if cachedBlock == nil {
+			parent, err = chain.BlockByHash(hash)
 			if err != nil {
 				return err
 			}
+		} else {
+			parent = cachedBlock
+		}
 
-			// Ensure the next tip hash is on the main chain.
-			if !chain.MainChainHasBlock(nextTipHash) {
-				return fmt.Errorf("the next block being synced to (%s) "+
-					"at height %d is "+"not on the main chain.",
-					nextTipHash, nextTipHeight)
-			}
+		child, err := chain.BlockByHash(nextTipHash)
+		if err != nil {
+			return err
+		}
 
-			var parent *dcrutil.Block
-			if cachedBlock == nil {
-				parent, err = chain.BlockByHash(hash)
-				if err != nil {
-					return err
-				}
-			} else {
-				parent = cachedBlock
-			}
-
-			child, err := chain.BlockByHash(nextTipHash)
+		// When the index requires all of the referenced
+		// txouts they need to be retrieved from the
+		// database.
+		var prevScripts PrevScripter
+		if indexNeedsInputs(indexer) {
+			var err error
+			prevScripts, err = chain.PrevScripts(child)
 			if err != nil {
 				return err
 			}
+		}
 
-			// When the index requires all of the referenced
-			// txouts they need to be retrieved from the
-			// database.
-			var prevScripts PrevScripter
-			if indexNeedsInputs(indexer) {
-				var err error
-				prevScripts, err = chain.PrevScripts(dbTx, child)
-				if err != nil {
-					return err
-				}
-			}
-
-			// Add all of the index entries associated
-			// with the block and update the index tip.
-			err = indexer.ProcessNotification(dbTx, &IndexNtfn{
+		// Add all of the index entries associated
+		// with the block and update the index tip.
+		err = db.Update(func(dbTx database.Tx) error {
+			return indexer.ProcessNotification(dbTx, &IndexNtfn{
 				NtfnType:    ConnectNtfn,
 				Block:       child,
 				Parent:      parent,
 				PrevScripts: prevScripts,
 			})
-			if err != nil {
-				return err
-			}
-
-			cachedBlock = child
-			hash = nextTipHash
-			height = nextTipHeight
-
-			// NOTE: This does not return as it does
-			// elsewhere since it would cause the
-			// database transaction to rollback and
-			// undo all work that has been done.
-			if interruptRequested(ctx) {
-				interrupted = true
-				break
-			}
+		})
+		if err != nil {
+			return err
 		}
 
-		if initialTipHeight != height {
-			log.Infof("Synced %d blocks to %s "+
-				"(heights %d to %d)", height-initialTipHeight,
-				indexer.Name(), initialTipHeight, height)
-		}
+		cachedBlock = child
+		hash = nextTipHash
+		height = nextTipHeight
 
-		return nil
-	})
-	if err != nil {
-		return err
+		if interruptRequested(ctx) {
+			return errInterruptRequested
+		}
 	}
-	if interrupted {
-		return errInterruptRequested
+
+	if initialTipHeight != height {
+		log.Infof("Synced %d blocks to %s "+
+			"(heights %d to %d)", height-initialTipHeight,
+			indexer.Name(), initialTipHeight, height)
 	}
+
 	return nil
 }
 
@@ -876,7 +845,9 @@ func (s *IndexSubscriber) Notify(ntfn *IndexNtfn) {
 	// Only relay notifications when there are subscribed indexes
 	// to be notified.
 	if clients > 0 {
-		s.c <- ntfn
+		go func() {
+			s.c <- ntfn
+		}()
 	}
 }
 
